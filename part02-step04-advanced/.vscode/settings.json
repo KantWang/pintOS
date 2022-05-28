@@ -1,0 +1,11 @@
+{
+    "C_Cpp.errorSquiggles": "Disabled",
+    "files.associations": {
+        "list.h": "c",
+        "thread.h": "c",
+        "interrupt.h": "c",
+        "intr-stubs.h": "c",
+        "intrinsic.h": "c",
+        "vaddr.h": "c"
+    }
+}
