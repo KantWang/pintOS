@@ -34,6 +34,7 @@ struct pool {
 };
 
 /* Two pools: one for kernel data, one for user pages. */
+// 이렇게 전역으로 선언해 두고 bitmap
 static struct pool kernel_pool, user_pool;
 
 /* Maximum number of pages to put in user pool. */
@@ -121,14 +122,26 @@ resolve_area_info (struct area *base_mem, struct area *ext_mem) {
  */
 static void
 populate_pools (struct area *base_mem, struct area *ext_mem) {
+	// printf("base_mem->size: %d, ext_mem->size: %d\n", base_mem->size, ext_mem->size);
+	/*
+		base_mem->size: 654336, ext_mem->size: 19791872
+	*/
 	extern char _end;
 	void *free_start = pg_round_up (&_end);
-
+	// printf("&_end: %p, free_start: %p\n", &_end, free_start);
+	/* 
+		&_end: 0x800422a8fc, free_start: 0x800422b000
+	*/
 	uint64_t total_pages = (base_mem->size + ext_mem->size) / PGSIZE;
 	uint64_t user_pages = total_pages / 2 > user_page_limit ?
 		user_page_limit : total_pages / 2;
 	uint64_t kern_pages = total_pages - user_pages;
-
+	// printf("total_pages: %d\nuser_pages: %d\nkern_pages: %d\n", total_pages, user_pages, kern_pages);
+	/*
+		total_pages: 4991 --> 20MB
+		user_pages:  2495 --> 10MB
+		kern_pages:  2496 --> 10MB
+	*/
 	// Parse E820 map to claim the memory region for each pool.
 	enum { KERN_START, KERN, USER_START, USER } state = KERN_START;
 	uint64_t rem = kern_pages;
@@ -158,8 +171,19 @@ populate_pools (struct area *base_mem, struct area *ext_mem) {
 						break;
 					}
 					// generate kernel pool
+					
 					init_pool (&kernel_pool,
 							&free_start, region_start, start + rem * PGSIZE);
+					// printf("&kernel_pool: %p\n&free_start: %p\nregion_start: %d\nstart: %d\nstart+rem*PGSIZE: %d\n", &kernel_pool, &free_start, region_start, start, start+rem*PGSIZE);
+					/*
+						&kernel_pool: 0x8004229c20
+						&free_start:  0x8004000ec0
+						region_start:     67108864
+						start:            68157440
+						start+rem*PGSIZE: 77729792
+					*/
+				// pml4_get_page(PAL_USER) --> user_pool
+							// 2496 * 4KB == 9.75MB 만큼의 kernel pool 확보
 					// Transition to the next state
 					if (rem == size_in_pg) {
 						rem = user_pages;
@@ -189,6 +213,13 @@ populate_pools (struct area *base_mem, struct area *ext_mem) {
 
 	// generate the user pool
 	init_pool(&user_pool, &free_start, region_start, end);
+	// printf("&user_pool: %p\n&free_start: %p\nregion_start: %d\nend: %d\n", &kernel_pool, &free_start, region_start, end);
+	/*
+		&user_pool:   0x8004229c20
+		&free_start:  0x8004000ec0
+		region_start: 77729792
+		end:          87949312
+	*/
 
 	// Iterate over the e820_entry. Setup the usable.
 	uint64_t usable_bound = (uint64_t) free_start;
@@ -240,6 +271,7 @@ palloc_init (void) {
 	// printf("palloc_init 시작\n");
   /* End of the kernel as recorded by the linker.
      See kernel.lds.S. */
+	/* 링커에 의해 기록된 커널의 끝 */
 	extern char _end;
 	struct area base_mem = { .size = 0 };
 	struct area ext_mem = { .size = 0 };
@@ -260,22 +292,31 @@ palloc_init (void) {
    then the pages are filled with zeros.  If too few pages are
    available, returns a null pointer, unless PAL_ASSERT is set in
    FLAGS, in which case the kernel panics. */
+/* page_cnt개의 연속 사용이 가능한 free 페이지를 획득 */
 void *
 palloc_get_multiple (enum palloc_flags flags, size_t page_cnt) {
 	struct pool *pool = flags & PAL_USER ? &user_pool : &kernel_pool;
 
-	lock_acquire (&pool->lock);
+	lock_acquire (&pool->lock); // 디스크 IO 작업 중 충돌 발생하지 않도록 lock
 	size_t page_idx = bitmap_scan_and_flip (pool->used_map, 0, page_cnt, false);
-	lock_release (&pool->lock);
+	/* 
+		page_cnt개의 페이지를 만들기 위해 HDD의 빈 블록을 찾아야 한다
+		bitmap이 0이면 free, 1이면 occupied 블록
+		page index를 리턴 받게 되며 해당 page를 의미하는 bitmap은 1로 변경됨
+	*/
+	// printf("	page_idx: %d\n", page_idx);
+
+	lock_release (&pool->lock); // 작업 마쳤으니 lock 해제
 	void *pages;
 
 	if (page_idx != BITMAP_ERROR)
-		pages = pool->base + PGSIZE * page_idx;
+		pages = pool->base + PGSIZE * page_idx; // 주소값 계산. page_idx가 1, 2, 3, 512, 513, ... 이런 식으로 나오니까
 	else
 		pages = NULL;
 
-	if (pages) {
-		if (flags & PAL_ZERO)
+	if (pages) { // 페이지 할당이 성공한 경우
+		// printf("flags & PAL_ASSERT:%d\nflags & PAL_ZERO:%d\nflags & PAL_USER:%d\n", flags & PAL_ASSERT, flags & PAL_ZERO, flags & PAL_USER);
+		if (flags & PAL_ZERO) // flags가 PAL_ZERO로 들어왔으면 메모리를 0으로 초기화
 			memset (pages, 0, PGSIZE * page_cnt);
 	} else {
 		if (flags & PAL_ASSERT)

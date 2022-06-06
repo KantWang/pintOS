@@ -118,7 +118,10 @@ sema_up (struct semaphore *sema) {
 	}
 	
 	sema->value++;
-	test_max_priority();
+	/* 5번 자식 프로세스 생성이 되지 않던 문제가 해결됨 */
+	if (!intr_context())
+		test_max_priority();
+
 	intr_set_level (old_level);
 }
 
@@ -205,30 +208,27 @@ lock_acquire (struct lock *lock) {
 	ASSERT (lock != NULL);
 	ASSERT (!intr_context ());
 	ASSERT (!lock_held_by_current_thread (lock));
-
-	/* mlfqs인 경우 아래 return;까지만 진행 */
-	if (thread_mlfqs) {
-		sema_down(&lock->semaphore);
-		lock->holder = thread_current();
-		return;
-	}
-
-	/* 현재 thread보다 lock을 들고 있는 thread의 priority가 더 낮아서 이 과정이 진행되는 것 */
 	struct thread *curr = thread_current();
 
+	/* mlfqs인 경우 아래 return;까지만 진행 */
+	// if (thread_mlfqs) {
+	// 	sema_down(&lock->semaphore);
+	// 	lock->holder = thread_current();
+	// 	return;
+	// }
 
-	if (lock->holder != NULL) { // 만약 lock이 사용 중이라면
+	/* 현재 thread보다 lock을 들고 있는 thread의 priority가 더 낮아서 이 과정이 진행되는 것 */
+	// if (lock->holder != NULL) { // 만약 lock이 사용 중이라면
+	if (!thread_mlfqs && lock->holder != NULL) {
 		curr->wait_on_lock = lock; // 현재 thread의 wait_on_lock에 lock 주소 정보 저장
 		/* lock holder thread의 donation 리스트에 현재 thread를 우선순위 순으로 저장 */
 		list_insert_ordered(&lock->holder->donations, &curr->donation_elem, thread_compare_donate_priority, 0);
-
 		donate_priority(); // priority 변경 작업 진행
 	}
 
 	sema_down (&lock->semaphore); // lock을 들고 있던 thread의 작업이 완료될 때까지 block 상태
 	curr->wait_on_lock = NULL; // 현재 thread가 lock을 획득했으므로 wait_on_lock 정보 제거
-
-	lock->holder = thread_current (); // Priority Inversion Problem 해결과정 후 lock의 홀더를 현재 thread로 변경
+	lock->holder = curr; // Priority Inversion Problem 해결과정 후 lock의 홀더를 현재 thread로 변경
 }
 
 /* Tries to acquires LOCK and returns true if successful or false

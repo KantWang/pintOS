@@ -239,13 +239,30 @@ thread_create (const char *name, int priority,
 	ASSERT (function != NULL);
 
 	/* Allocate thread. */
-	t = palloc_get_page (PAL_ZERO);
+	t = palloc_get_page (PAL_ZERO); // kernel pool
 	if (t == NULL)
 		return TID_ERROR;
 
 	/* Initialize thread. */
-	init_thread (t, name, priority); // 
+	init_thread (t, name, priority);
 	tid = t->tid = allocate_tid ();
+
+	/* project02. system call */
+	/* 현재 스레드의 자식 리스트에 새로 생성한 스레드 추가 */
+    struct thread *curr = thread_current();
+    list_push_back(&curr->child_list,&t->child_elem);
+
+	/* fd 초기화 */
+	t->file_descriptor_table = palloc_get_multiple(PAL_ZERO, FDT_PAGES);
+	if (t->file_descriptor_table == NULL)
+		return TID_ERROR;
+	t->fdidx = 2;
+	t->file_descriptor_table[0] = 0;
+	t->file_descriptor_table[1] = 1;
+	
+	/* project02. system call - option */
+	t->stdin_count = 1;
+	t->stdout_count = 1;
 
 	/* Call the kernel_thread if it scheduled.
 	 * Note) rdi is 1st argument, and rsi is 2nd argument. */
@@ -266,15 +283,6 @@ thread_create (const char *name, int priority,
 	if (thread_current()->priority < t->priority) {
 		thread_yield();
 	}
-
-	/* project02. system call */
-	t->file_descriptor_table = palloc_get_multiple(PAL_ZERO, FDT_PAGES);
-	if (t->file_descriptor_table == NULL)
-		return TID_ERROR;
-	
-	t->file_descriptor_table[0] = 1; // stdin 자리: 1 배정
-	t->file_descriptor_table[1] = 2; // stdout 자리: 2 배정
-	t->fdidx = 2; // 0은 stdin, 1은 stdout에 이미 할당
 
 	return tid;
 }
@@ -513,6 +521,7 @@ test_max_priority (void) {
 	if (list_empty(&ready_list)){
 		return;
 	}
+
 	// list_less_func *less;
 	// struct list_elem *max_ready_priority = list_max(&ready_list, cmp_priority, NULL);
 	struct list_elem *max_ready_priority = list_front(&ready_list);
@@ -665,6 +674,12 @@ init_thread (struct thread *t, const char *name, int priority) {
 
 	/* project02. system call */
 	t->exit_status = 0;
+	list_init(&t->child_list);
+	sema_init(&t->wait_sema,0);
+	sema_init(&t->fork_sema,0);
+	sema_init(&t->free_sema,0);
+
+	t->running = NULL;
 }
 
 /* Chooses and returns the next thread to be scheduled.  Should

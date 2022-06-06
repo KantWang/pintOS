@@ -81,13 +81,14 @@ filesys_create (const char *name, off_t initial_size) {
 struct file *
 filesys_open (const char *name) {
 	struct dir *dir = dir_open_root ();
-	struct inode *inode = NULL;
+	/* struct dir *dir = calloc (1, sizeof *dir); */
+	struct inode *inode = NULL; // inode에 파일 이름을 제외한 파일의 메타데이터 저장
 
 	if (dir != NULL)
-		dir_lookup (dir, name, &inode);
-	dir_close (dir);
+		dir_lookup (dir, name, &inode); // dir에서 파일명이 name인 것을 찾아 &inode 값 업데이트
+	dir_close (dir); // calloc 받은 dir free 처리
 
-	return file_open (inode);
+	return file_open (inode); // fide descriptor 생성 후 inode 정보를 그곳에 저장 
 }
 
 /* Deletes the file named NAME.

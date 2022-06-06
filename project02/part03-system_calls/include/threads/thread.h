@@ -4,6 +4,7 @@
 #include <debug.h>
 #include <list.h>
 #include <stdint.h>
+#include "threads/synch.h"
 #include "threads/interrupt.h"
 #ifdef VM
 #include "vm/vm.h"
@@ -125,15 +126,29 @@ struct thread {
 	unsigned magic;                     /* Detects stack overflow. */
 
 	/* --- Project2: User programs - system call --- */
-	int exit_status; // _exit(), _wait() 구현 때 사용
+	/* 자식 프로세스 순회용 리스트 */
+    struct list child_list;
+    struct list_elem child_elem;
+
+    /* wait_sema 를 이용하여 자식 프로세스가 종료할때까지 대기함. 종료 상태를 저장 */
+    struct semaphore wait_sema;
+    int exit_status;
+
+    /* 자식에게 넘겨줄 intr_frame
+    fork가 완료될때 까지 부모가 기다리게 하는 forksema
+    자식 프로세스 종료상태를 부모가 받을때까지 종료를 대기하게 하는 free_sema */
+    struct intr_frame parent_if;
+    struct semaphore fork_sema;
+    struct semaphore free_sema;
+
 	struct file **file_descriptor_table; // FDT
 	int fdidx; // fd index
 	
-	// struct intr_frame parent_if; // _fork() 구현 때 사용, __do_fork() 함수
-	// struct list child_list; // _wait() 구현 때 사용, process_wait() 함수
-	// struct list_elem child_elem; // _wait() 구현 때 사용, process_wait() 함수
-	// struct semaphore fork_sema; // _fork() 구현 시 사용, __do_fork() 함수 
+	int stdin_count;
+    int stdout_count;
 
+	/* 현재 실행 중인 파일 */
+	struct file *running;
 };
 
 /* If false (default), use round-robin scheduler.

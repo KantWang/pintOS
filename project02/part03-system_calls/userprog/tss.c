@@ -71,5 +71,23 @@ tss_get (void) {
 void
 tss_update (struct thread *next) {
 	ASSERT (tss != NULL);
-	tss->rsp0 = (uint64_t) next + PGSIZE;
+	tss->rsp0 = (uint64_t) next + PGSIZE; // 48bit addr = 1111010100101010101010101010101010010101010101
 }
+
+/*
+
+255TiB - kernel addr space 
+
+code
+TCB
+kernel stack 
+...
+------
+1TiB - 
+------ KERN_BASE == 2**40  vtop(addr), ptov(addr)
+1TiB - user addr space
+pml4_set_page
+
+48 == 9   9   9   9   12  4KB
+      p1 p2  p3  p4   offset
+*/

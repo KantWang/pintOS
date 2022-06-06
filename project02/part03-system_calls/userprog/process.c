@@ -26,6 +26,9 @@ static void process_cleanup (void);
 static bool load (const char *file_name, struct intr_frame *if_);
 static void initd (void *f_name);
 static void __do_fork (void *);
+struct thread *get_child_with_pid(int pid);
+
+static bool setup_stack (struct intr_frame *if_);
 
 /* General process initializer for initd and other process. */
 static void
@@ -80,16 +83,34 @@ initd (void *f_name) {
 
 /* Clones the current process as `name`. Returns the new process's thread id, or
  * TID_ERROR if the thread cannot be created. */
+/* 여기서 name은 유저 name, if_도 유저 스택 */
 tid_t
 process_fork (const char *name, struct intr_frame *if_ UNUSED) {
 	/* Clone current thread to new thread.*/
-	return thread_create (name,
-			PRI_DEFAULT, __do_fork, thread_current ());
+	/* project02. system call */
+	struct thread *parent = thread_current();
+	// 현재 thread의 parent_if에 if_를 저장
+	// printf("	1. parent_if: %p\n", parent->parent_if);
+	memcpy(&parent->parent_if, if_, sizeof(struct intr_frame));
+	// printf("	2. parent_if: %p\n", parent->parent_if);
+
+	tid_t tid = thread_create(name, PRI_DEFAULT, __do_fork, parent); // 여기서 child_list에 자식의 elem 추가됨
+
+	if (tid == TID_ERROR)
+		return TID_ERROR;
+	
+	struct thread *child = get_child_with_pid(tid); // child thread를 찾고
+	sema_down(&child->fork_sema); // 자식이 메모리에 load 될 때까지 blocked
+	if (child->exit_status == -1)
+		return TID_ERROR;
+
+	return tid;
 }
 
 #ifndef VM
 /* Duplicate the parent's address space by passing this function to the
  * pml4_for_each. This is only for the project 2. */
+/*  */
 static bool
 duplicate_pte (uint64_t *pte, void *va, void *aux) {
 	struct thread *current = thread_current ();
@@ -99,48 +120,79 @@ duplicate_pte (uint64_t *pte, void *va, void *aux) {
 	bool writable;
 
 	/* 1. TODO: If the parent_page is kernel page, then return immediately. */
+	if is_kernel_vaddr(va)
+		return true;
 
 	/* 2. Resolve VA from the parent's page map level 4. */
 	parent_page = pml4_get_page (parent->pml4, va);
+	if (parent_page == NULL)
+		return false;
 
 	/* 3. TODO: Allocate new PAL_USER page for the child and set result to
 	 *    TODO: NEWPAGE. */
+	// newpage = palloc_get_page(PAL_USER | PAL_ZERO);
+	newpage = palloc_get_page(PAL_USER);
+	if (newpage == NULL)
+		return false;
 
 	/* 4. TODO: Duplicate parent's page to the new page and
 	 *    TODO: check whether parent's page is writable or not (set WRITABLE
 	 *    TODO: according to the result). */
+	memcpy(newpage, parent_page, PGSIZE);
+	writable = is_writable(pte);
 
 	/* 5. Add new page to child's page table at address VA with WRITABLE
 	 *    permission. */
 	if (!pml4_set_page (current->pml4, va, newpage, writable)) {
 		/* 6. TODO: if fail to insert page, do error handling. */
+		return false;
 	}
 	return true;
 }
 #endif
+
+struct MapElem
+{
+	/* key - parent's struct file */
+	uintptr_t key;
+	/* value - child's newly created struct file */
+	uintptr_t value;
+};
 
 /* A thread function that copies parent's execution context.
  * Hint) parent->tf does not hold the userland context of the process.
  *       That is, you are required to pass second argument of process_fork to
  *       this function. */
 static void
-__do_fork (void *aux) {
+__do_fork (void *aux) { // 부모 스레드가 인자로 들어옴. 부모의 것들을 자식에게 모두 복사해서 메모리에 올림
 	struct intr_frame if_;
 	struct thread *parent = (struct thread *) aux;
-	struct thread *current = thread_current ();
+	struct thread *current = thread_current (); // 자식 스레드
 	/* TODO: somehow pass the parent_if. (i.e. process_fork()'s if_) */
 	struct intr_frame *parent_if;
 	bool succ = true;
 
+	/* process_fork에서 복사 해두었던 intr_frame */
+	parent_if = &parent->parent_if;
+
 	/* 1. Read the cpu context to local stack. */
-	memcpy (&if_, parent_if, sizeof (struct intr_frame));
+	memcpy (&if_, parent_if, sizeof (struct intr_frame)); // if_에 parent_if를 복사
+	if_.R.rax = 0; // if_의 R.rax 레지스터를 0으로 초기화(?)
 
 	/* 2. Duplicate PT */
 	current->pml4 = pml4_create();
 	if (current->pml4 == NULL)
 		goto error;
 
-	process_activate (current);
+	process_activate (current); // tss를 업데이트. 자식 스레드 주소를 인자로 넣어준다
+	/*
+		void
+		tss_update (struct thread *next) {
+			ASSERT (tss != NULL);
+			tss->rsp0 = (uint64_t) next + PGSIZE; // tss->rsp0에 자식주소 + PGSIZE를 저장
+												  // 즉,
+		}
+	*/
 #ifdef VM
 	supplemental_page_table_init (&current->spt);
 	if (!supplemental_page_table_copy (&current->spt, &parent->spt))
@@ -155,14 +207,65 @@ __do_fork (void *aux) {
 	 * TODO:       in include/filesys/file.h. Note that parent should not return
 	 * TODO:       from the fork() until this function successfully duplicates
 	 * TODO:       the resources of parent.*/
+	if (parent->fdidx == FDCOUNT_LIMIT)
+		goto error;
 
-	process_init ();
+	/* Project2-extra) multiple fds sharing same file - use associative map 
+	(e.g. dict, hashmap) to duplicate these relationships
+	other test-cases like multi-oom don't need this feature */
+	const int MAPLEN = 10; 
+	struct MapElem map[10];
 
+	/* index for filling map */ 
+	int dupCount = 0;
+	
+	current->file_descriptor_table[0] = parent->file_descriptor_table[0];
+	current->file_descriptor_table[1] = parent->file_descriptor_table[1];
+
+	for (int i = 2; i < FDCOUNT_LIMIT; i++) {
+		struct file *file = parent->file_descriptor_table[i];
+		if (file == NULL)
+			continue;
+		
+		/* Project2-extra) linear search on key-pair array
+		If 'file' is already duplicated in child, don't duplicate again but share it */
+		bool found = false;
+		for (int j = 0; j < MAPLEN; j++) {
+			if (map[j].key == file) {
+				found = true;
+				current->file_descriptor_table[i] = map[j].value;
+				break;
+			}
+		}
+		if (!found) {
+			struct file *new_file;
+			if (file > 2)
+				new_file = file_duplicate(file);
+			else
+				new_file = file;
+			
+			current->file_descriptor_table[i] = new_file;
+			// if (dupCount < MAPLEN) {
+			// 	map[dupCount].key = file;
+			// 	map[dupCount++].value = new_file;
+			// }
+		}
+	}
+		
+	current->fdidx = parent->fdidx;
+	sema_up(&current->fork_sema); 
 	/* Finally, switch to the newly created process. */
 	if (succ)
 		do_iret (&if_);
+
+	// if_.R.rax = 0;	
+	// process_init();
+
 error:
-	thread_exit ();
+	current->exit_status = TID_ERROR;
+	sema_up(&current->fork_sema);
+	exit(TID_ERROR);
+	// thread_exit ();
 }
 
 /* Switch the current execution context to the f_name.
@@ -170,13 +273,14 @@ error:
 int
 process_exec (void *f_name) {
 	// printf("process_exec 진입, f_name: %s\n", f_name);
+	// f_name: child-args childarg
 	char *file_name = f_name;
 	bool success;
 
 	/* We cannot use the intr_frame in the thread structure.
 	 * This is because when current thread rescheduled,
 	 * it stores the execution information to the member. */
-	struct intr_frame _if;
+	struct intr_frame _if; // 커널 스택 영역에 저장되겠지
 	_if.ds = _if.es = _if.ss = SEL_UDSEG;
 	_if.cs = SEL_UCSEG;
 	_if.eflags = FLAG_IF | FLAG_MBS;
@@ -188,15 +292,18 @@ process_exec (void *f_name) {
 	int argc = 0;
 
 	char *token, *save_ptr;
-	token = strtok_r(file_name, " ", &save_ptr);
+	token = strtok_r(file_name, " ", &save_ptr); // " "를 기준으로 한 단어씩 return
 	while (token != NULL) {
 		argv[argc] = token;
 		token = strtok_r(NULL, " ", &save_ptr);
+		/* If S is null, start from saved position. */
 		argc++;
 	}
 
 	/* And then load the binary */
-	success = load (file_name, &_if);
+	// 이때 file_name은 공백이 '\0'으로 치환되어 있음
+	success = load (file_name, &_if); 
+	
 
 	/* If load failed, quit. */
 	if (!success){
@@ -210,7 +317,8 @@ process_exec (void *f_name) {
 
 	/* Start switched process. */
 	// printf("do_iret 시작\n");
-	do_iret (&_if);
+	// 여기까지 kernel mode
+	do_iret (&_if); // do_iret 후 user mode
 	// printf("do_iret 완료\n");
 	NOT_REACHED ();
 }
@@ -224,7 +332,7 @@ void argument_stack(char **argv, int argc, struct intr_frame *if_) {
 	for (int i = argc-1; i> -1; i--) { 
 		argc_len = strlen(argv[i]);
 		if_->rsp = if_->rsp - (argc_len + 1);
-		memcpy(if_->rsp, argv[i], argc_len+1);
+		memcpy(if_->rsp, argv[i], argc_len+1); // null 공간까지 메모리에 cpy
 		arg_address[i] = if_->rsp;
 	}
 
@@ -270,8 +378,24 @@ process_wait (tid_t child_tid UNUSED) {
 	 * XXX:       to add infinite loop here before
 	 * XXX:       implementing the process_wait. */
 	// while (1){}
-	for (int i = 0; i < 100000000; i++);
-	return -1;
+	// for (int i = 0; i < 100000000; i++);
+
+	struct thread *child = get_child_with_pid(child_tid);
+
+	if (child == NULL)
+		return -1;
+
+	/* 자식 프로세스가 종료할때 까지 대기 */
+	sema_down(&child->wait_sema);
+
+	/* 자식으로 부터 종료인자를 전달 받고 리스트에서 삭제 */
+	int exit_status = child->exit_status;
+	list_remove(&child->child_elem);
+
+	/* 자식 프로세스 종료 상태인자 받은 후 자식 프로세스 종료하게 함 */
+	sema_up(&child->free_sema);
+
+	return exit_status;
 }
 
 /* Exit the process. This function is called by thread_exit (). */
@@ -283,7 +407,26 @@ process_exit (void) {
 	 * TODO: project2/process_termination.html).
 	 * TODO: We recommend you to implement process resource cleanup here. */
 
+	// P2-4 CLose all opened files	
+	for (int i = 0; i < FDCOUNT_LIMIT; i++)
+	{
+		close(i);
+	}
+
+	/* thread_create에서 할당한 페이지 할당 해제 */
+	palloc_free_multiple(curr->file_descriptor_table, FDT_PAGES); 
+
+	/* 현재 프로세스가 실행중인 파일 종료 */
+	file_close(curr->running);
+
+	/* 현재 프로세스의 자원 반납 */
 	process_cleanup ();
+
+	/* 부모 프로세스가 자식 프로세스의 종료상태 확인하게 함 */
+	sema_up(&curr->wait_sema);
+	
+	/* 부모 프로세스가 자식 프로세스 종료인자 받을때 까지 대기 */
+	sema_down(&curr->free_sema);
 }
 
 /* Free the current process's resources. */
@@ -375,7 +518,38 @@ struct ELF64_PHDR {
 
 /* Abbreviations */
 #define ELF ELF64_hdr
+/*
+	ELF(Executable and Linkable Format)
+	실행 파일, 목적 파일, 공유 라이브러리 그리고 코어 덤프를 위한 표준 파일 형식
+	파일의 구성을 나타내는 로드맵과 같은 역할
+
+	각 ELF 파일은 하나의 ELF 헤더와 파일 데이터로 이루어진다. 파일 데이터는 다음을 포함한다.
+	-	0개 또는 그 이상의 세그먼트들을 정의하는 프로그램 헤더 테이블
+	-	0개 또는 그 이상의 섹션들을 정의하는 섹션 헤더 테이블
+	-	프로그램 헤더 테이블 또는 섹션 헤더 테이블의 엔트리들에 의해 참조되는 데이터
+
+	e_version	오리지날 버전의 ELF인 경우 1로 설정된다.
+	e_entry		이것은 엔트리 포인트의 메모리 주소이다. 
+	        	즉 프로세스가 어디서 실행을 시작하는지를 말해준다. 
+				이 필드는 위에서 정의한 32비트 또는 64비트에 따라 길이가 다르다.
+	e_phoff		프로그램 헤더 테이블의 시작을 가리킨다.
+	e_shoff		섹션 헤더 테이블의 시작을 가리킨다.
+	e_flags		대상 아키텍처에 따라 이 필드의 해석이 달라진다.
+	e_ehsize	이 헤더의 크기를 가지며 일반적으로 64비트의 경우 64바이트,
+				32비트의 경우 52바이트이다.
+	e_phentsize	프로그램 헤더 테이블 엔트리의 크기를 갖는다.
+	e_phnum		프로그램 헤더 테이블에서 엔트리의 개수.
+	e_shentsize	섹션 헤더 테이블 엔트리의 크기를 갖는다.
+	e_shnum		섹션 헤더 테이블에서 엔트리의 개수.
+	e_shstrndx	섹션 이름들을 포함하는 섹션 헤더 테이블 엔트리의 인덱스.
+*/
 #define Phdr ELF64_PHDR
+/*
+	ELF에는 여러 개의 Segment들이 존재하며 각 Segment들에 대한 정보를 가지고 있는 녀석이 있음. 그게 Program Header
+
+	Segment란? 
+	-	동일한 메모리 속성(read-only, writable, ...)을 가진 하나 또는 그 이상의 섹션의 집합
+*/
 
 static bool setup_stack (struct intr_frame *if_);
 static bool validate_segment (const struct Phdr *, struct file *);
@@ -390,8 +564,10 @@ static bool load_segment (struct file *file, off_t ofs, uint8_t *upage,
 static bool
 load (const char *file_name, struct intr_frame *if_) {
 	// printf("load 진입, file_name: %s\n", file_name);
+	// file_name: child-args
+	// file_name == "child-args\0childarg\0"이기 때문에 위와 같이 print 찍힘
 	struct thread *t = thread_current ();
-	struct ELF ehdr;
+	struct ELF ehdr; // ehdr에 open한 file의 elf header 정보를 저장
 	struct file *file = NULL;
 	off_t file_ofs;
 	bool success = false;
@@ -401,17 +577,30 @@ load (const char *file_name, struct intr_frame *if_) {
 	t->pml4 = pml4_create ();
 	if (t->pml4 == NULL)
 		goto done;
-	process_activate (thread_current ());
+	process_activate (thread_current ()); /* 까볼 것 */
 
 	/* Open executable file. */
 	file = filesys_open (file_name);
 	// printf("	filesys_open 완료, file: %d\n", file);
+	// file: 69476440 <-- fd. thread의 file_descriptor_table에 저장됨
+
 	if (file == NULL) {
 		printf ("load: %s: open failed\n", file_name);
 		goto done;
 	}
 
+	t->running = file; // 프로세스가 현재 실행중인 파일
+	// 이렇게 스레드가 file을 가리키고 있으니까 load에서 file에 다 때려박으면 되는거구나
+
+	/* 오픈된 파일은 디스크에 쓰기 금지. 파일 닫을 때 변경사항 업데이트 */
+	// 왜 못쓰게 되는지 확인하자.
+	// 타고 타고 들어가보면 inode->deny_write_cnt == 0이어야 write가 가능하게 되어있음
+	// 그런데 file_deny_write에서 inode->deny_write_cnt++해줌.
+	// file_allow_write(file) 될 때까지 쓰기 금지.
+	file_deny_write(file);
+
 	/* Read and verify executable header. */
+	// file_read로 ehdr에 file의 elf header 정보 저장
 	if (file_read (file, &ehdr, sizeof ehdr) != sizeof ehdr
 			|| memcmp (ehdr.e_ident, "\177ELF\2\1\1", 7)
 			|| ehdr.e_type != 2
@@ -424,17 +613,21 @@ load (const char *file_name, struct intr_frame *if_) {
 	}
 
 	/* Read program headers. */
-	file_ofs = ehdr.e_phoff; // 파일오프셋 = ehdr.e_프로그램 헤더 오프셋
-	for (i = 0; i < ehdr.e_phnum; i++) {
+	file_ofs = ehdr.e_phoff; // 프로그램 헤더 테이블의 시작. 첫번째 프로그램 헤더의 주소이기도 하니까.. 첫번째 세그먼트의 주소
+	for (i = 0; i < ehdr.e_phnum; i++) { // 모든 프로그램 헤더 탐색
 		struct Phdr phdr;
 
-		if (file_ofs < 0 || file_ofs > file_length (file))
+		if (file_ofs < 0 || file_ofs > file_length (file)) // 프로그램 헤더 테이블의 모든 원소 확인 완료
 			goto done;
-		file_seek (file, file_ofs);
-
+		file_seek (file, file_ofs); 
+		/* 
+			위에서 file_ofs를 프로그램 헤더 테이블의 시작으로 변경했으니 file->pos = ehdr.e_phoff 즉, 첫번째 세그먼트로 file->pos 변경
+			이후 과정은 당연하게도 다음 세그먼트로 pos 변경 계속하겠지
+			모든 세그먼트를 loading 해야하니 당연히 이렇다
+		*/
 		if (file_read (file, &phdr, sizeof phdr) != sizeof phdr)
 			goto done;
-		file_ofs += sizeof phdr;
+		file_ofs += sizeof phdr; // 그르치
 		switch (phdr.p_type) {
 			case PT_NULL:
 			case PT_NOTE:
@@ -467,7 +660,7 @@ load (const char *file_name, struct intr_frame *if_) {
 						zero_bytes = ROUND_UP (page_offset + phdr.p_memsz, PGSIZE);
 					}
 					if (!load_segment (file, file_page, (void *) mem_page,
-								read_bytes, zero_bytes, writable))
+								read_bytes, zero_bytes, writable)) // 그르치. 모든 세그먼트 로드. 어디에? file에.
 						goto done;
 				}
 				else
@@ -475,8 +668,10 @@ load (const char *file_name, struct intr_frame *if_) {
 				break;
 		}
 	}
+	/* 이 위까지 완료되면서 HDD에서 메모리로의 loading이 끝났다 */
 
 	/* Set up stack. */
+	/* 까볼 것 */
 	if (!setup_stack (if_))
 		goto done;
 
@@ -490,7 +685,7 @@ load (const char *file_name, struct intr_frame *if_) {
 
 done:
 	/* We arrive here whether the load is successful or not. */
-	file_close (file);
+	// file_close (file);
 	return success;
 }
 
@@ -609,11 +804,13 @@ setup_stack (struct intr_frame *if_) {
 	uint8_t *kpage;
 	bool success = false;
 
-	kpage = palloc_get_page (PAL_USER | PAL_ZERO);
+	kpage = palloc_get_page (PAL_USER | PAL_ZERO); // PAL_USER이므로 user_pool에.
+												   // PAL_ZERO이므로 0으로 초기화.
 	if (kpage != NULL) {
-		success = install_page (((uint8_t *) USER_STACK) - PGSIZE, kpage, true);
+		
+		success = install_page (((uint8_t *) USER_STACK) - PGSIZE, kpage, true); // writable == true이므로 pte가 없으면 create
 		if (success)
-			if_->rsp = USER_STACK;
+			if_->rsp = USER_STACK; // 스택 포인터 설정
 		else
 			palloc_free_page (kpage);
 	}
@@ -629,12 +826,19 @@ setup_stack (struct intr_frame *if_) {
  * with palloc_get_page().
  * Returns true on success, false if UPAGE is already mapped or
  * if memory allocation fails. */
+/* 
+	사용자 가상 주소 UPAGE에서 커널 가상 주소 KPAGE로의 매핑을 페이지 테이블에 추가합니다. WRITABLE이 true이면 사용자 프로세스가 페이지를 수정할 수 있습니다. 그렇지 않으면 읽기 전용입니다. UPAGE는 이미 매핑되어 있지 않아야 합니다. KPAGE는 아마도 palloc_get_page()를 사용하여 사용자 풀에서 얻은 페이지여야 합니다. 성공하면 true, UPAGE가 이미 매핑되어 있거나 메모리 할당에 실패하면 false를 반환합니다. 
+*/
 static bool
 install_page (void *upage, void *kpage, bool writable) {
 	struct thread *t = thread_current ();
 
 	/* Verify that there's not already a page at that virtual
 	 * address, then map our page there. */
+	/* 
+		upage를 kpage에 매핑한 후 t의 페이지 테이블에 추가 
+		당연히 upage가 가리키는 곳에 이미 페이지가 할당되어 있으면 안된다	
+	*/
 	return (pml4_get_page (t->pml4, upage) == NULL
 			&& pml4_set_page (t->pml4, upage, kpage, writable));
 }
@@ -706,3 +910,20 @@ setup_stack (struct intr_frame *if_) {
 	return success;
 }
 #endif /* VM */
+
+struct thread *get_child_with_pid(int pid) {
+	struct thread *cur = thread_current();
+	struct list *child_list = &cur->child_list;
+
+#ifdef DEBUG_WAIT
+	printf("\nparent children # : %d\n", list_size(child_list));
+#endif
+
+	for (struct list_elem *e = list_begin(child_list); e != list_end(child_list); e = list_next(e))
+	{
+		struct thread *t = list_entry(e, struct thread, child_elem);
+		if (t->tid == pid)
+			return t;
+	}	
+	return NULL;
+}

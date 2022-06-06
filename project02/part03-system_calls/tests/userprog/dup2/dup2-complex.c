@@ -22,9 +22,11 @@ char magic[] = {
 
 int
 main (int argc UNUSED, char *argv[] UNUSED) {
+  printf("  argc: %d, argv[0]: %s, argv[1]: %s\n", argc, argv[0], argv[1]);
   char *buffer;
   int byte_cnt = 0;
   int fd1, fd2, fd3 = 0x1CE, fd4 = 0x1CE - 0xC0FFEE, fd5, fd6;
+  
 
   close (0);
 

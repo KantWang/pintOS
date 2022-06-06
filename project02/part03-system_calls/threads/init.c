@@ -83,10 +83,12 @@ main (void) {
 	console_init ();
 
 	/* Initialize memory system. */
-	mem_end = palloc_init ();
+	mem_end = palloc_init (); // return == 20,840,448
+							  // 2^24   == 16,777,216
+							  //            4,063,232 == 약 2^22
 	malloc_init ();
-	paging_init (mem_end);
-
+	paging_init (mem_end); // 어쨌든, 4MB보다 조금 더 크게 paging_init
+						   
 #ifdef USERPROG
 	tss_init ();
 	gdt_init ();
@@ -144,7 +146,8 @@ bss_init (void) {
  * and then sets up the CPU to use the new page directory.
  * Points base_pml4 to the pml4 it creates. */
 static void
-paging_init (uint64_t mem_end) {
+paging_init (uint64_t mem_end) { // mem_end: 20,840,448
+	// printf("		mem_end: %d\n", mem_end);
 	// printf("paging_init 시작\n");
 	uint64_t *pml4, *pte;
 	int perm;

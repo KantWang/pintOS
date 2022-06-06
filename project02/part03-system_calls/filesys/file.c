@@ -3,23 +3,19 @@
 #include "filesys/inode.h"
 #include "threads/malloc.h"
 
-/* An open file. */
-struct file {
-	struct inode *inode;        /* File's inode. */
-	off_t pos;                  /* Current position. */
-	bool deny_write;            /* Has file_deny_write() been called? */
-};
-
 /* Opens a file for the given INODE, of which it takes ownership,
  * and returns the new file.  Returns a null pointer if an
  * allocation fails or if INODE is null. */
 struct file *
 file_open (struct inode *inode) {
+	// printf("	file_open\n");
 	struct file *file = calloc (1, sizeof *file);
 	if (inode != NULL && file != NULL) {
 		file->inode = inode;
 		file->pos = 0;
 		file->deny_write = false;
+
+		file->dupCount = 0;
 		return file;
 	} else {
 		inode_close (inode);
@@ -71,6 +67,7 @@ file_get_inode (struct file *file) {
  * Advances FILE's position by the number of bytes read. */
 off_t
 file_read (struct file *file, void *buffer, off_t size) {
+	// printf("	file_read\n");
 	off_t bytes_read = inode_read_at (file->inode, buffer, size, file->pos);
 	file->pos += bytes_read;
 	return bytes_read;
@@ -95,6 +92,7 @@ file_read_at (struct file *file, void *buffer, off_t size, off_t file_ofs) {
  * Advances FILE's position by the number of bytes read. */
 off_t
 file_write (struct file *file, const void *buffer, off_t size) {
+	// printf("	file_write\n");
 	off_t bytes_written = inode_write_at (file->inode, buffer, size, file->pos);
 	file->pos += bytes_written;
 	return bytes_written;
@@ -118,9 +116,11 @@ file_write_at (struct file *file, const void *buffer, off_t size,
 void
 file_deny_write (struct file *file) {
 	ASSERT (file != NULL);
-	if (!file->deny_write) {
-		file->deny_write = true;
-		inode_deny_write (file->inode);
+
+	// 바로 위 file_write_at --> inode_write_at 진입 시 file->inode->deny_write_cnt를 검사하는데 0이 아니면 return 0. 즉, 쓰기 불가능이다
+	if (!file->deny_write) { // deny_write == false면
+		file->deny_write = true; // true로 변경
+		inode_deny_write (file->inode); // inode의 deny_write_cnt++
 	}
 }
 

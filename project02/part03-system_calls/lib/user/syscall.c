@@ -87,6 +87,8 @@ fork (const char *thread_name){
 
 int
 exec (const char *file) {
+	// printf("	file: %s\n", file);
+	// file: child-args childarg
 	return (pid_t) syscall1 (SYS_EXEC, file);
 }
 

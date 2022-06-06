@@ -16,10 +16,10 @@
    If bit 0 in an element represents bit K in the bitmap,
    then bit 1 in the element represents bit K+1 in the bitmap,
    and so on. */
-typedef unsigned long elem_type;
+typedef unsigned long elem_type; // size of (unsigned long) == 8 byte
 
 /* Number of bits in an element. */
-#define ELEM_BITS (sizeof (elem_type) * CHAR_BIT)
+#define ELEM_BITS (sizeof (elem_type) * CHAR_BIT) // CHAR_BIT == 8
 
 /* From the outside, a bitmap is an array of bits.  From the
    inside, it's an array of elem_type (defined above) that
@@ -40,7 +40,13 @@ elem_idx (size_t bit_idx) {
    BIT_IDX is turned on. */
 static inline elem_type
 bit_mask (size_t bit_idx) {
+	// printf("	ELEM_BITS: %d\n", ELEM_BITS); 64 맞음
 	return (elem_type) 1 << (bit_idx % ELEM_BITS);
+	/* 
+		예를들어 bit_idx가 645다?
+		그러면 리턴되는 값은 1 << 5
+		즉, 64비트 중 1 << 5 위치를 1로 마스킹 하라는 것
+	*/
 }
 
 /* Returns the number of elements required for BIT_CNT bits. */
@@ -133,6 +139,7 @@ bitmap_set (struct bitmap *b, size_t idx, bool value) {
 	ASSERT (b != NULL);
 	ASSERT (idx < b->bit_cnt);
 	if (value)
+	/* b의 idx위치 bit를 1로 변경 */
 		bitmap_mark (b, idx);
 	else
 		bitmap_reset (b, idx);
@@ -142,12 +149,29 @@ bitmap_set (struct bitmap *b, size_t idx, bool value) {
 void
 bitmap_mark (struct bitmap *b, size_t bit_idx) {
 	size_t idx = elem_idx (bit_idx);
+	/* 
+		1
+		2
+		3
+		5
+		600
+		601
+		
+		bit_idx / 64를 리턴하는데,
+		0번 elem: 0~63 bit_idx
+		1번 elem: 64~127 bit_idx
+		2번 elem: ...
+	*/
 	elem_type mask = bit_mask (bit_idx);
 
 	/* This is equivalent to `b->bits[idx] |= mask' except that it
 	   is guaranteed to be atomic on a uniprocessor machine.  See
 	   the description of the OR instruction in [IA32-v2b]. */
 	asm ("lock orq %1, %0" : "=m" (b->bits[idx]) : "r" (mask) : "cc");
+	/*  
+		bits 배열의 각 원소 하나하나가 64비트 짜리다
+		그래서 idx
+	*/
 }
 
 /* Atomically sets the bit numbered BIT_IDX in B to false. */
@@ -204,6 +228,7 @@ bitmap_set_multiple (struct bitmap *b, size_t start, size_t cnt, bool value) {
 	ASSERT (start + cnt <= b->bit_cnt);
 
 	for (i = 0; i < cnt; i++)
+		/* 주소 b로 접근해서  */
 		bitmap_set (b, start + i, value);
 }
 
@@ -277,6 +302,7 @@ bitmap_scan (const struct bitmap *b, size_t start, size_t cnt, bool value) {
 		size_t i;
 		for (i = start; i <= last; i++)
 			if (!bitmap_contains (b, i, cnt, !value))
+			/* i부터 cnt가 연속해서 !value이면 return 1, 아니면 return 0 */
 				return i;
 	}
 	return BITMAP_ERROR;
@@ -291,9 +317,11 @@ bitmap_scan (const struct bitmap *b, size_t start, size_t cnt, bool value) {
    setting them. */
 size_t
 bitmap_scan_and_flip (struct bitmap *b, size_t start, size_t cnt, bool value) {
+	/* cnt개의 연속된 사용 가능한 bit의 시작을 찾아서 리턴 */
 	size_t idx = bitmap_scan (b, start, cnt, value);
 	if (idx != BITMAP_ERROR)
-		bitmap_set_multiple (b, idx, cnt, !value);
+		bitmap_set_multiple (b, idx, cnt, !value); 
+		// false가 들어왔으면 true 세팅, 즉 사용 표시
 	return idx;
 }
 

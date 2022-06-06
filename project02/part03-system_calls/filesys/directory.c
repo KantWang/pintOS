@@ -111,6 +111,8 @@ dir_lookup (const struct dir *dir, const char *name,
 
 	if (lookup (dir, name, &e, NULL))
 		*inode = inode_open (e.inode_sector);
+		// 하나의 섹터를 찾는 과정
+		// 섹터는 HDD에 트랙에
 	else
 		*inode = NULL;
 

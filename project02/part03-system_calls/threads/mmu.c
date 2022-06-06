@@ -61,6 +61,9 @@ pdpe_walk (uint64_t *pdpe, const uint64_t va, int create) {
  * on CREATE.  If CREATE is true, then a new page table is
  * created and a pointer into it is returned.  Otherwise, a null
  * pointer is returned. */
+/*
+	페이지 맵 레벨 4, pml4의 가상 주소 VADDR에 대한 페이지 테이블 항목의 주소를 반환합니다. PML4E에 VADDR에 대한 페이지 테이블이 없으면 동작은 CREATE에 따라 다릅니다. CREATE가 true이면 새 페이지 테이블이 생성되고 이에 대한 포인터가 반환됩니다. 그렇지 않으면 널 포인터가 리턴됩니다.
+*/
 uint64_t *
 pml4e_walk (uint64_t *pml4e, const uint64_t va, int create) {
 	uint64_t *pte = NULL;
@@ -212,7 +215,7 @@ pml4_activate (uint64_t *pml4) {
  * UADDR is unmapped. */
 void *
 pml4_get_page (uint64_t *pml4, const void *uaddr) {
-	ASSERT (is_user_vaddr (uaddr));
+	ASSERT (is_user_vaddr (uaddr)); // user vaddr이어야만 get page 가능
 
 	uint64_t *pte = pml4e_walk (pml4, (uint64_t) uaddr, 0);
 
@@ -231,15 +234,20 @@ pml4_get_page (uint64_t *pml4, const void *uaddr) {
  * failed. */
 bool
 pml4_set_page (uint64_t *pml4, void *upage, void *kpage, bool rw) {
+	// printf("	set_page\n");
 	ASSERT (pg_ofs (upage) == 0);
 	ASSERT (pg_ofs (kpage) == 0);
 	ASSERT (is_user_vaddr (upage));
 	ASSERT (pml4 != base_pml4);
 
 	uint64_t *pte = pml4e_walk (pml4, (uint64_t) upage, 1);
+	// printf("	pte: %lx\n", *pte);
 
+	// 이게 아까 user pool에서 페이지를 palloc_get_page 했으니까
+	// vtop로...
 	if (pte)
 		*pte = vtop (kpage) | PTE_P | (rw ? PTE_W : 0) | PTE_U;
+		// printf("	pte: %lx\n", *pte);
 	return pte != NULL;
 }
 
